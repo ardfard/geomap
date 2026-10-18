@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Geomap: 3D geological block diagram (WebGPU)</title>
+  <title>Geomap: 3D terrain and geology (WebGPU)</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -13,25 +13,31 @@
   <aside class="panel">
     <header>
       <p class="eyebrow">Sheet 42 · WebGPU</p>
-      <h1>Geological Block Diagram</h1>
-      <p class="sub">Folded Palaeozoic strata cut by a normal fault and a granite pluton, under a Mesozoic cover.</p>
+      <h1 class="geo-only">Geological Block Diagram</h1>
+      <h1 class="terrain-only">Terrain</h1>
+      <p class="sub geo-only">Folded Palaeozoic strata cut by a normal fault and a granite pluton, under a Mesozoic cover.</p>
+      <p class="sub terrain-only">Procedural mountains with dry grassland, chaparral and a valley reservoir.</p>
+      <div class="modes" role="group" aria-label="View">
+        <button type="button" data-set-mode="terrain">Terrain</button>
+        <button type="button" data-set-mode="geology">Geology</button>
+      </div>
     </header>
 
     <section>
-      <h2>Section</h2>
-      <label>Slice east <output id="sliceXVal"></output>
+      <h2>View</h2>
+      <label class="geo-only">Slice east <output id="sliceXVal"></output>
         <input id="sliceX" type="range" min="-0.6" max="1" step="0.005" /></label>
-      <label>Slice south <output id="sliceZVal"></output>
+      <label class="geo-only">Slice south <output id="sliceZVal"></output>
         <input id="sliceZ" type="range" min="-0.6" max="1" step="0.005" /></label>
       <label>Vertical exaggeration <output id="exagVal"></output>
         <input id="exag" type="range" min="0.5" max="3" step="0.05" /></label>
     </section>
 
     <section>
-      <h2>Structure</h2>
-      <label>Fold amplitude <output id="foldVal"></output>
+      <h2><span class="geo-only">Structure</span><span class="terrain-only">Light</span></h2>
+      <label class="geo-only">Fold amplitude <output id="foldVal"></output>
         <input id="fold" type="range" min="0" max="0.25" step="0.005" /></label>
-      <label>Fault throw <output id="throwVal"></output>
+      <label class="geo-only">Fault throw <output id="throwVal"></output>
         <input id="throw" type="range" min="-0.15" max="0.15" step="0.005" /></label>
       <label>Sun azimuth <output id="sunVal"></output>
         <input id="sun" type="range" min="0" max="360" step="1" /></label>
@@ -39,15 +45,15 @@
 
     <section class="toggles">
       <label><input id="contours" type="checkbox" /> Contours</label>
-      <label><input id="contacts" type="checkbox" /> Contacts</label>
-      <label><input id="intrusion" type="checkbox" /> Pluton</label>
+      <label class="geo-only"><input id="contacts" type="checkbox" /> Contacts</label>
+      <label class="geo-only"><input id="intrusion" type="checkbox" /> Pluton</label>
       <label><input id="rotate" type="checkbox" /> Rotate</label>
     </section>
 
     <button id="seed">New terrain</button>
   </aside>
 
-  <aside class="legend">
+  <aside class="legend geo-only">
     <h2>Stratigraphy</h2>
     <ul id="legend"></ul>
     <p class="key"><span class="fault"></span>Fault</p>

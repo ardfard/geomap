@@ -92,7 +92,9 @@ struct U {
   clip: vec4f,   // xmin, xmax, zmin, zmax
   p0: vec4f,     // exaggeration, baseY, contours, N
   geo: vec4f,    // foldAmp, faultThrow, intrusion, seed
-  p1: vec4f,     // wallSegments, contacts, time, -
+  p1: vec4f,     // wallSegments, contacts, time, mode (0 geology, 1 terrain)
+  invViewProj: mat4x4f,
+  p2: vec4f,     // waterLevel
 };
 
 @group(0) @binding(0) var<uniform> u: U;
@@ -312,7 +314,110 @@ fn lineMask(d: f32, w0: f32, w1: f32) -> f32 {
   return 1.0 - smoothstep(w0, w1, d / fw);
 }
 
+// ---------------------------------------------------------------- natural terrain
+
+fn skyColor(dir: vec3f) -> vec3f {
+  let L = normalize(u.lightDir.xyz);
+  let t = clamp(dir.y, 0.0, 1.0);
+  var c = mix(vec3f(0.82, 0.81, 0.78), vec3f(0.42, 0.60, 0.82), smoothstep(0.0, 0.16, t));
+  let sunAmt = max(dot(normalize(dir), L), 0.0);
+  c += vec3f(1.0, 0.82, 0.55) * (pow(sunAmt, 6.0) * 0.18 + pow(sunAmt, 300.0) * 0.6);
+  return c;
+}
+
+// Distance haze; the terrain also dissolves into haze towards its edges so it reads as endless.
+fn applyFog(col: vec3f, wp: vec3f) -> vec3f {
+  let v = wp - u.camPos.xyz;
+  let d = length(v);
+  let edge = smoothstep(0.55, 0.98, max(abs(wp.x), abs(wp.z)));
+  let f = clamp(max((1.0 - exp(-d * 0.25)) * 0.75, edge * smoothstep(0.4, 1.0, d)), 0.0, 1.0);
+  return mix(col, skyColor(v / d), f);
+}
+
+fn naturalColor(gp: vec3f, n: vec3f) -> vec3f {
+  let so = vec2f(u.geo.w * 13.7, u.geo.w * 7.1);
+  let slope = 1.0 - n.y;
+  let water = u.p2.x;
+
+  // dry grass, varying in tone; rock and scree on the steeper faces
+  var ground = mix(vec3f(0.76, 0.65, 0.48), vec3f(0.63, 0.53, 0.38), fbm(gp.xz * 6.0 + so, 4));
+  let streak = vnoise(vec2f(gp.x * 90.0 + gp.z * 30.0, gp.y * 400.0));
+  let rock = mix(vec3f(0.52, 0.43, 0.33), vec3f(0.64, 0.55, 0.43), streak);
+  ground = mix(ground, rock, smoothstep(0.22, 0.48, slope));
+
+  // greener, darker ground near the valley floors
+  let wet = 1.0 - smoothstep(water, water + 0.07, gp.y);
+  ground = mix(ground, vec3f(0.47, 0.48, 0.30), wet * 0.55);
+
+  // tree cover: clumped, favouring north-facing slopes and lower ground
+  var dens = 0.4 + 0.55 * clamp(-n.z * 3.0, 0.0, 1.0) * smoothstep(0.02, 0.2, slope)
+           + 0.35 * wet - 0.5 * smoothstep(0.22, 0.36, gp.y);
+  dens += (fbm(gp.xz * 14.0 + so + 7.0, 3) - 0.5) * 1.0;
+  dens = clamp(dens, 0.0, 1.0) * (1.0 - smoothstep(0.42, 0.65, slope));
+
+  // individual crowns on a jittered grid, each with a lit side and a cast shadow
+  let tp = gp.xz * 420.0;
+  let cell = floor(tp);
+  let L2 = normalize(u.lightDir.xz + vec2f(1e-4));
+  var crown = 0.0;
+  var lit = 0.0;
+  var castSh = 0.0;
+  for (var y = -1; y <= 1; y++) {
+    for (var x = -1; x <= 1; x++) {
+      let c = cell + vec2f(f32(x), f32(y));
+      let ci = vec2i(c);
+      let h = hash2i(ci + vec2i(911, 377));
+      if (h < dens) {
+        let jit = vec2f(hash2i(ci + vec2i(57, 13)), hash2i(ci + vec2i(5, 91))) - 0.5;
+        let ctr = c + 0.5 + jit * 0.5;
+        let r = 0.38 + 0.25 * hash2i(ci + vec2i(3, 7));
+        let d = (tp - ctr) / r;
+        let k = 1.0 - smoothstep(0.75, 1.0, length(d));
+        if (k > crown) {
+          crown = k;
+          lit = 0.5 + 0.5 * dot(d, L2);
+        }
+        castSh = max(castSh, 1.0 - smoothstep(0.6, 1.1, length(d + L2 * 0.8)));
+      }
+    }
+  }
+  let treeCol = mix(vec3f(0.13, 0.17, 0.09), vec3f(0.33, 0.37, 0.20), lit);
+  let near = mix(ground * (1.0 - 0.45 * castSh), treeCol, crown);
+  // far away individual crowns alias, so fade to their average look
+  let far = mix(ground, vec3f(0.19, 0.23, 0.12), dens * 0.6);
+  return mix(near, far, smoothstep(0.5, 1.5, length(fwidth(tp))));
+}
+
+fn detailNormal(gp: vec3f, n: vec3f) -> vec3f {
+  let p = gp.xz * 45.0;
+  let e = 0.05;
+  let h0 = fbm(p, 4);
+  let dx = (fbm(p + vec2f(e, 0.0), 4) - h0) / e;
+  let dz = (fbm(p + vec2f(0.0, e), 4) - h0) / e;
+  return normalize(n + vec3f(-dx, 0.0, -dz) * 0.18);
+}
+
+fn shadeNatural(wp: vec3f, nrm: vec3f) -> vec3f {
+  let gp = vec3f(wp.x, wp.y / u.p0.x, wp.z);
+  let n = normalize(nrm);
+  let base = naturalColor(gp, n);
+  let dn = detailNormal(gp, n);
+  let L = normalize(u.lightDir.xyz);
+  let sh = shadowAt(wp, n);
+  let amb = mix(vec3f(0.30, 0.29, 0.30), vec3f(0.42, 0.48, 0.58), 0.5 + 0.5 * dn.y);
+  var col = base * (amb + vec3f(1.05, 0.96, 0.82) * max(dot(dn, L), 0.0) * sh);
+  // contours, optional
+  let hc = gp.y / 0.025;
+  let fh = max(fwidth(hc), 1e-6);
+  let major = 1.0 - smoothstep(0.6, 1.5, abs(fract(hc / 5.0 - 0.5) - 0.5) * 5.0 / fh);
+  col = mix(col, col * 0.6, major * 0.5 * u.p0.z);
+  return applyFog(col, wp);
+}
+
 @fragment fn fsTerrain(in: VOut) -> @location(0) vec4f {
+  if (u.p1.w > 0.5) {
+    return vec4f(shadeNatural(in.wp, in.nrm), 1.0);
+  }
   let ex = u.p0.x;
   let gp = vec3f(in.wp.x, in.wp.y / ex, in.wp.z);
   let g = geology(gp);
@@ -378,5 +483,42 @@ struct GOut { @builtin(position) pos: vec4f, @location(0) wp: vec3f };
   let fade = 1.0 - smoothstep(0.4, 2.6, length(in.wp.xz));
   let a = clamp((0.22 * (1.0 - sh) + 0.38 * exp(-max(d, 0.0) * 18.0)) * fade, 0.0, 0.6);
   return vec4f(vec3f(0.12, 0.09, 0.07) * a, a);
+}
+
+// ---------------------------------------------------------------- sky and water (terrain mode)
+
+struct SOut { @builtin(position) pos: vec4f, @location(0) ndc: vec2f };
+
+@vertex fn vsSky(@builtin(vertex_index) vi: u32) -> SOut {
+  let p = vec2f(f32((vi << 1u) & 2u), f32(vi & 2u)) * 2.0 - 1.0;
+  return SOut(vec4f(p, 1.0, 1.0), p);
+}
+
+@fragment fn fsSky(in: SOut) -> @location(0) vec4f {
+  let w = u.invViewProj * vec4f(in.ndc, 1.0, 1.0);
+  let dir = normalize(w.xyz / w.w - u.camPos.xyz);
+  return vec4f(skyColor(dir), 1.0);
+}
+
+@vertex fn vsWater(@builtin(vertex_index) vi: u32) -> VOut {
+  var c = array<vec2f, 6>(vec2f(-1, -1), vec2f(1, -1), vec2f(-1, 1), vec2f(1, -1), vec2f(1, 1), vec2f(-1, 1));
+  let p = vec3f(c[vi].x, u.p2.x * u.p0.x, c[vi].y);
+  return VOut(u.viewProj * vec4f(p, 1.0), p, vec3f(0.0, 1.0, 0.0));
+}
+
+@fragment fn fsWater(in: VOut) -> @location(0) vec4f {
+  let depth = u.p2.x - heightTri(in.wp.x, in.wp.z);
+  let V = normalize(u.camPos.xyz - in.wp);
+  let rip = vec2f(vnoise(in.wp.xz * 140.0 + u.p1.z * 0.4), vnoise(in.wp.xz * 140.0 - u.p1.z * 0.3 + 9.0)) - 0.5;
+  let n = normalize(vec3f(rip.x * 0.12, 1.0, rip.y * 0.12));
+  let R = reflect(-V, n);
+  let fres = 0.08 + 0.7 * pow(1.0 - max(dot(n, V), 0.0), 4.0);
+  let sh = shadowAt(in.wp, vec3f(0.0, 1.0, 0.0));
+  let body = mix(vec3f(0.33, 0.43, 0.42), vec3f(0.18, 0.30, 0.38), smoothstep(0.0, 0.03, depth));
+  var col = mix(body * (0.55 + 0.45 * sh), skyColor(vec3f(R.x, abs(R.y), R.z)), fres);
+  let L = normalize(u.lightDir.xyz);
+  col += vec3f(1.0, 0.9, 0.7) * pow(max(dot(R, L), 0.0), 200.0) * sh * 0.8;
+  col = mix(col, vec3f(0.80, 0.76, 0.66), (1.0 - smoothstep(0.0, 0.004, depth)) * 0.5); // shore
+  return vec4f(applyFog(col, in.wp), 1.0);
 }
 `;

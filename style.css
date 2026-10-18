@@ -212,3 +212,25 @@ button:hover { background: var(--accent); }
   .legend { display: none; }
   .panel { width: calc(100% - 40px); }
 }
+
+body[data-mode='terrain'] .geo-only,
+body[data-mode='geology'] .terrain-only { display: none; }
+
+.modes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin-top: 14px;
+  border: 1px solid var(--ink);
+}
+.modes button {
+  margin: 0;
+  padding: 7px;
+  color: var(--ink);
+  background: transparent;
+}
+.modes button[aria-pressed='true'] {
+  color: var(--paper);
+  background: var(--ink);
+}
+.modes button:hover { background: rgba(43, 38, 32, 0.12); }
+.modes button[aria-pressed='true']:hover { background: var(--ink); }

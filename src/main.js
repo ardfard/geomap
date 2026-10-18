@@ -7,6 +7,8 @@ const WALL_SEGMENTS = GRID * 2; // segments per block side
 const SHADOW_SIZE = 2048;
 const SAMPLES = 4;
 const BASE_Y = -0.25;      // bottom of the block (unexaggerated)
+const WATER_Y = 0.07;      // reservoir level in terrain mode (unexaggerated)
+const UNIFORM_FLOATS = 80;
 
 // ---------------------------------------------------------------- math (column-major)
 
@@ -42,6 +44,29 @@ function ortho(l, r, b, t, n, f) {
   ]);
 }
 
+function invert(m) {
+  const inv = new Float32Array(16);
+  inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+  inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+  inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+  inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+  inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+  inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+  inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+  inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+  inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+  inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+  inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+  inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[2] * m[14] - m[4] * m[3] * m[13] - m[12] * m[2] * m[6] + m[12] * m[3] * m[5];
+  inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+  inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+  inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+  inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+  const det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+  for (let i = 0; i < 16; i++) inv[i] /= det;
+  return inv;
+}
+
 function mul(a, b) {
   const o = new Float32Array(16);
   for (let c = 0; c < 4; c++)
@@ -57,6 +82,7 @@ function mul(a, b) {
 
 const $ = (id) => document.getElementById(id);
 const state = {
+  mode: params.get('mode') === 'geology' ? 'geology' : 'terrain',
   seed: 3,
   exag: 1.3,
   fold: 0.15,
@@ -64,13 +90,26 @@ const state = {
   sliceX: 1,
   sliceZ: 1,
   sun: 135,
-  contours: true,
+  contours: false,
   contacts: true,
   intrusion: true,
   rotate: true,
 };
 
-const cam = { yaw: -0.75, pitch: 0.5, dist: 4.4, target: [0.15, 0.0, 0] };
+const CAMERAS = {
+  terrain: { yaw: -0.75, pitch: 0.3, dist: 1.2, target: [0.05, 0.1, 0.05] },
+  geology: { yaw: -0.75, pitch: 0.5, dist: 4.4, target: [0.15, 0.0, 0] },
+};
+const cam = structuredClone(CAMERAS[state.mode]);
+
+function setMode(mode) {
+  state.mode = mode;
+  Object.assign(cam, structuredClone(CAMERAS[mode]));
+  document.body.dataset.mode = mode;
+  for (const b of document.querySelectorAll('[data-set-mode]')) b.setAttribute('aria-pressed', b.dataset.setMode === mode);
+  state.contours = mode === 'geology';
+  $('contours').checked = state.contours;
+}
 
 function bindUI(onSeed) {
   const sliders = [
@@ -93,6 +132,8 @@ function bindUI(onSeed) {
     el.checked = state[key];
     el.addEventListener('change', () => { state[key] = el.checked; });
   }
+  for (const b of document.querySelectorAll('[data-set-mode]')) b.addEventListener('click', () => setMode(b.dataset.setMode));
+  setMode(state.mode);
   $('seed').addEventListener('click', () => {
     state.seed = Math.floor(Math.random() * 1000);
     onSeed();
@@ -130,7 +171,7 @@ function bindCamera(canvas) {
       cam.target[2] -= (right[2] * dx + fwd[2] * dy) * s;
     } else {
       cam.yaw -= dx * 0.006;
-      cam.pitch = Math.min(1.45, Math.max(0.08, cam.pitch + dy * 0.005));
+      cam.pitch = Math.min(1.45, Math.max(0.04, cam.pitch + dy * 0.005));
     }
   });
   const end = () => { drag = null; };
@@ -138,7 +179,7 @@ function bindCamera(canvas) {
   canvas.addEventListener('pointercancel', end);
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
-    cam.dist = Math.min(8, Math.max(1.2, cam.dist * Math.exp(e.deltaY * 0.001)));
+    cam.dist = Math.min(8, Math.max(0.4, cam.dist * Math.exp(e.deltaY * 0.001)));
   }, { passive: false });
 }
 
@@ -209,7 +250,7 @@ async function init() {
   };
 
   // --- render resources
-  const uniformBuf = device.createBuffer({ size: 56 * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const uniformBuf = device.createBuffer({ size: UNIFORM_FLOATS * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const shadowTex = device.createTexture({
     size: [SHADOW_SIZE, SHADOW_SIZE],
     format: 'depth32float',
@@ -220,7 +261,7 @@ async function init() {
   const bgl0 = device.createBindGroupLayout({
     entries: [
       { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-      { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+      { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
     ],
   });
   const bgl1 = device.createBindGroupLayout({
@@ -258,7 +299,7 @@ async function init() {
     primitive: { topology: 'triangle-list', cullMode: 'none' },
     depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less' },
   });
-  const mainPipe = (vs, fs, blend) => device.createRenderPipeline({
+  const mainPipe = (vs, fs, blend, depthCompare = 'less') => device.createRenderPipeline({
     layout: mainLayout,
     vertex: { module, entryPoint: vs },
     fragment: {
@@ -273,7 +314,7 @@ async function init() {
       }],
     },
     primitive: { topology: 'triangle-list', cullMode: 'none' },
-    depthStencil: { format: 'depth24plus', depthWriteEnabled: !blend, depthCompare: 'less' },
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: !blend && depthCompare !== 'always', depthCompare },
     multisample: { count: SAMPLES },
   });
 
@@ -283,6 +324,8 @@ async function init() {
     terrain: mainPipe('vsTerrain', 'fsTerrain', false),
     walls: mainPipe('vsWalls', 'fsWalls', false),
     ground: mainPipe('vsGround', 'fsGround', true),
+    sky: mainPipe('vsSky', 'fsSky', false, 'always'),
+    water: mainPipe('vsWater', 'fsWater', false),
   };
 
   const terrainVerts = (GRID - 1) * (GRID - 1) * 6;
@@ -335,14 +378,14 @@ async function init() {
     return new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(blob); });
   };
 
-  const u = new Float32Array(56);
+  const u = new Float32Array(UNIFORM_FLOATS);
   let last = performance.now();
 
   function frame(now) {
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
     resize();
-    if (state.rotate) cam.yaw += dt * 0.12;
+    if (state.rotate) cam.yaw += dt * (state.mode === 'terrain' ? 0.04 : 0.12);
 
     const eye = [
       cam.target[0] + cam.dist * Math.cos(cam.pitch) * Math.sin(cam.yaw),
@@ -353,19 +396,23 @@ async function init() {
     const proj = perspective(0.6, canvas.width / canvas.height, 0.05, 30);
 
     const az = (state.sun * Math.PI) / 180;
-    const el = 0.75;
+    const terrain = state.mode === 'terrain';
+    const el = terrain ? 0.5 : 0.75;
     const lightDir = [Math.cos(el) * Math.cos(az), Math.sin(el), Math.cos(el) * Math.sin(az)];
     const lightView = lookAt(lightDir.map((v) => v * 4), [0, 0, 0], [0, 1, 0]);
     const lightProj = ortho(-1.9, 1.9, -1.9, 1.9, 0.5, 8);
 
-    u.set(mul(proj, view), 0);
+    const viewProj = mul(proj, view);
+    u.set(viewProj, 0);
     u.set(mul(lightProj, lightView), 16);
     u.set([...eye, 1], 32);
     u.set([...lightDir, 0], 36);
-    u.set([-1, state.sliceX, -1, state.sliceZ], 40);
+    u.set(terrain ? [-1, 1, -1, 1] : [-1, state.sliceX, -1, state.sliceZ], 40);
     u.set([state.exag, BASE_Y, state.contours ? 1 : 0, GRID], 44);
     u.set([state.fold, state.throw, state.intrusion ? 1 : 0, state.seed], 48);
-    u.set([WALL_SEGMENTS, state.contacts ? 1 : 0, now / 1000, 0], 52);
+    u.set([WALL_SEGMENTS, state.contacts ? 1 : 0, now / 1000, terrain ? 1 : 0], 52);
+    u.set(invert(viewProj), 56);
+    u.set([WATER_Y, 0, 0, 0], 72);
     device.queue.writeBuffer(uniformBuf, 0, u);
 
     const enc = device.createCommandEncoder();
@@ -377,8 +424,10 @@ async function init() {
     sp.setBindGroup(0, bg0);
     sp.setPipeline(pipes.shadowTerrain);
     sp.draw(terrainVerts);
-    sp.setPipeline(pipes.shadowWalls);
-    sp.draw(wallVerts);
+    if (!terrain) {
+      sp.setPipeline(pipes.shadowWalls);
+      sp.draw(wallVerts);
+    }
     sp.end();
 
     const mp = enc.beginRenderPass({
@@ -393,12 +442,21 @@ async function init() {
     });
     mp.setBindGroup(0, bg0);
     mp.setBindGroup(1, bg1);
+    if (terrain) {
+      mp.setPipeline(pipes.sky);
+      mp.draw(3);
+    }
     mp.setPipeline(pipes.terrain);
     mp.draw(terrainVerts);
-    mp.setPipeline(pipes.walls);
-    mp.draw(wallVerts);
-    mp.setPipeline(pipes.ground);
-    mp.draw(6);
+    if (terrain) {
+      mp.setPipeline(pipes.water);
+      mp.draw(6);
+    } else {
+      mp.setPipeline(pipes.walls);
+      mp.draw(wallVerts);
+      mp.setPipeline(pipes.ground);
+      mp.draw(6);
+    }
     mp.end();
 
     if (capture) {
