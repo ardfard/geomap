@@ -2,7 +2,7 @@ import { HEIGHT_WGSL, RENDER_WGSL } from './shaders.js';
 import { UNITS } from './geology.js';
 
 const params = new URLSearchParams(location.search);
-const GRID = Math.min(1024, Math.max(64, +params.get('grid') || 512)); // heightmap resolution
+const GRID = Math.min(1024, Math.max(64, Math.floor(+params.get('grid')) || 512)); // heightmap resolution
 const WALL_SEGMENTS = GRID * 2; // segments per block side
 const SHADOW_SIZE = 2048;
 const SAMPLES = 4;
@@ -135,8 +135,7 @@ function bindUI(onSeed) {
   for (const b of document.querySelectorAll('[data-set-mode]')) b.addEventListener('click', () => setMode(b.dataset.setMode));
   setMode(state.mode);
   $('seed').addEventListener('click', () => {
-    state.seed = Math.floor(Math.random() * 1000);
-    onSeed();
+    onSeed(Math.floor(Math.random() * 1000));
   });
 
   const legend = $('legend');
@@ -188,7 +187,7 @@ function bindCamera(canvas) {
 async function init() {
   const canvas = $('gpu');
   let generate = async () => {};
-  bindUI(() => generate());
+  bindUI((seed) => generate(seed));
   bindCamera(canvas);
   if (!navigator.gpu) return fail('This browser does not support WebGPU.');
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
@@ -202,10 +201,10 @@ async function init() {
   ctx.configure({ device, format, alphaMode: 'premultiplied' });
 
   // --- heightmap generation (compute)
-  const heightBuf = device.createBuffer({
-    size: GRID * GRID * 4,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
-  });
+  // The compute pass writes raw noise to its own buffer; only the normalised result reaches
+  // heightBuf, so frames drawn while a new terrain is generating keep showing the old one.
+  const heightBuf = device.createBuffer({ size: GRID * GRID * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  const rawBuf = device.createBuffer({ size: GRID * GRID * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
   const genParams = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const genPipeline = device.createComputePipeline({
     layout: 'auto',
@@ -214,16 +213,16 @@ async function init() {
   const genBG = device.createBindGroup({
     layout: genPipeline.getBindGroupLayout(0),
     entries: [
-      { binding: 0, resource: { buffer: heightBuf } },
+      { binding: 0, resource: { buffer: rawBuf } },
       { binding: 1, resource: { buffer: genParams } },
     ],
   });
 
   let generating = false;
-  generate = async () => {
+  generate = async (seed) => {
     if (generating) return;
     generating = true;
-    device.queue.writeBuffer(genParams, 0, new Float32Array([GRID, state.seed, 0, 0]));
+    device.queue.writeBuffer(genParams, 0, new Float32Array([GRID, seed, 0, 0]));
     const staging = device.createBuffer({ size: GRID * GRID * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     const enc = device.createCommandEncoder();
     const pass = enc.beginComputePass();
@@ -231,7 +230,7 @@ async function init() {
     pass.setBindGroup(0, genBG);
     pass.dispatchWorkgroups(Math.ceil(GRID / 8), Math.ceil(GRID / 8));
     pass.end();
-    enc.copyBufferToBuffer(heightBuf, 0, staging, 0, GRID * GRID * 4);
+    enc.copyBufferToBuffer(rawBuf, 0, staging, 0, GRID * GRID * 4);
     device.queue.submit([enc.finish()]);
 
     // normalise the raw noise into a predictable elevation range
@@ -246,6 +245,7 @@ async function init() {
       h[i] = 0.03 + Math.pow(t, 1.4) * 0.36;
     }
     device.queue.writeBuffer(heightBuf, 0, h);
+    state.seed = seed; // the geology noise switches together with the heightmap
     generating = false;
   };
 
@@ -345,7 +345,7 @@ async function init() {
     depthTex = device.createTexture({ size: [w, h], format: 'depth24plus', sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT });
   }
 
-  await generate();
+  await generate(state.seed);
   $('loading').remove();
 
   // Debug hook: render one frame offscreen and return it as a PNG data URL.
@@ -474,11 +474,15 @@ async function init() {
 }
 
 function fail(msg) {
-  const el = $('loading');
-  if (el) {
-    el.textContent = msg;
-    el.classList.add('error');
+  // #loading is removed once the first terrain is up, so recreate it for later errors (device loss)
+  let el = $('loading');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'loading';
+    $('gpu').after(el);
   }
+  el.textContent = msg;
+  el.classList.add('error');
   console.error(msg);
 }
 
